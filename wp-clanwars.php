@@ -5,7 +5,7 @@
  * Plugin URI: https://bitbucket.org/and/wp-clanwars
  * Description: ClanWars plugin for a cyber-sport team website
  * Author: Andrej Mihajlov
- * Version: 1.6.0
+ * Version: 1.6.1
  *
  * Tags: cybersport, clanwar, team, clan, cyber, sport, match
  **/
@@ -29,7 +29,7 @@ if(!function_exists('add_action')) die('Cheatin&#8217; uh?');
 
 global $wpClanWars;
 
-define('WP_CLANWARS_VERSION', '1.6.0');
+define('WP_CLANWARS_VERSION', '1.6.1');
 
 define('WP_CLANWARS_TEXTDOMAIN', 'wp-clanwars');
 define('WP_CLANWARS_CATEGORY', '_wp_clanwars_category');
@@ -43,6 +43,7 @@ define('WP_CLANWARS_IMPORTURL', WP_CLANWARS_URL . '/' . WP_CLANWARS_IMPORTDIR);
 
 // this folder is created in wp-content/
 define('WP_CLANWARS_EXPORTDIR', 'wp-clanwars');
+define('WP_CLANWARS_ZIPINDEX', 'index.json');
 
 require (dirname(__FILE__) . '/wp-clanwars-widget.php');
 require_once(ABSPATH . 'wp-admin/includes/class-pclzip.php');
@@ -1329,7 +1330,7 @@ class WP_ClanWars {
 
 			if(!empty($attach)) {
 				$game_data['icon'] = array(
-					'filename' => trim(str_replace($upload_dir['basedir'], '', $attach), '/'),
+					'filename' => trim(str_replace($upload_dir['basedir'], '', $attach), '/\\'),
 					'mimetype' => $mimetype
 				);
 				$zip_files[] = $attach;
@@ -1345,7 +1346,7 @@ class WP_ClanWars {
 
 				if(!empty($attach)) {
 					$map_data['screenshot'] = array(
-						'filename' => trim(str_replace($upload_dir['basedir'], '', $attach), '/'),
+						'filename' => trim(str_replace($upload_dir['basedir'], '', $attach), '/\\'),
 						'mimetype' => $mimetype
 					);
 					$zip_files[] = $attach;
@@ -1357,35 +1358,67 @@ class WP_ClanWars {
 
 		// define a folder for temporary index.json that we need to add into zip archive
 		$index_file_dir = sprintf('%s/zip-' . md5(microtime(true)), $export_dir);
-		$index_file_json = sprintf('%s/index.json', $index_file_dir);
 
 		// create folders for zip file
 		$wp_filesystem->mkdir($export_dir);
-		$wp_filesystem->mkdir($index_file_dir);
-		$wp_filesystem->put_contents($index_file_json, json_encode($game_data));
 
 		// create zip file
 		$zip_path = sprintf('%s/gamepack-%s.zip', $export_dir, (strlen($game->abbr) ? $game->abbr : $game->id));
-		$zip_acrhive = new PclZip($zip_path);
 
-		// zip index.json first
-		$result = $zip_acrhive->create($index_file_json,
-			PCLZIP_OPT_REMOVE_PATH, $index_file_dir,
-			PCLZIP_OPT_NO_COMPRESSION);
+		// encode game data as JSON
+		$index_json = json_encode($game_data);
 
-		// zip all images
-		$result = $zip_acrhive->add($zip_files,
-			PCLZIP_OPT_REMOVE_PATH, $upload_dir['basedir'],
-			PCLZIP_OPT_NO_COMPRESSION);
+		// clean up existing file first
+		$wp_filesystem->delete($zip_path);
 
-		// remove temp folder
-		$wp_filesystem->rmdir($index_file_dir, true);
+		// Zip can use a lot of memory, but not this much hopefully
+		/** This filter is documented in wp-admin/admin.php */
+		@ini_set( 'memory_limit', apply_filters( 'admin_memory_limit', WP_MAX_MEMORY_LIMIT ) );
 
-		if($result != 0) {
-			return $zip_path;
+		// use pecl ZipArchive if available
+		if(class_exists('ZipArchive')) {
+			$zip_acrhive = new ZipArchive();
+
+			// open archive
+			if($zip_acrhive->open($zip_path, ZIPARCHIVE::CREATE) !== true) {
+				return new WP_Error('plugin-error', 'Failed to open ZIP file. Reason: ' . $zip_acrhive->getStatusString());
+			}
+
+			// zip index.json first
+			$zip_acrhive->addFromString(WP_CLANWARS_ZIPINDEX, $index_json);
+
+			// zip all images
+			foreach($zip_files as $file) {
+				$localname = trim(str_replace($upload_dir['basedir'], '', $file), '/\\');
+				$zip_acrhive->addFile($file, $localname);
+			}
+
+			// close archive
+			$zip_acrhive->close();
+		} else {
+			// fallback to PclZip
+			$zip_acrhive = new PclZip($zip_path);
+
+			// PclZip does not support adding files from memory
+			$index_file_json = trailingslashit($index_file_dir) . WP_CLANWARS_ZIPINDEX;
+			$wp_filesystem->mkdir($index_file_dir);
+			$wp_filesystem->put_contents($index_file_json, $index_json);
+
+			// zip index.json first
+			$zip_status = $zip_acrhive->create($index_file_json, PCLZIP_OPT_REMOVE_PATH, $index_file_dir);
+
+			// zip all images
+			$zip_status = $zip_acrhive->add($zip_files, PCLZIP_OPT_REMOVE_PATH, $upload_dir['basedir']);
+
+			// remove temp folder
+			$wp_filesystem->rmdir($index_file_dir, true);
+
+			if($zip_status === 0) {
+				return new WP_Error('zip-error', 'Failed to ZIP files. Reason: ' . $zip_acrhive->errorInfo(true));
+			}
 		}
 
-		return new WP_Error('zip-error', 'Failed to ZIP files. Reason: ' . $zip_acrhive->errorInfo(true));
+		return $zip_path;
 	}
 
 	function _import_image($p, $zip_dir) {
@@ -1432,23 +1465,30 @@ class WP_ClanWars {
 		$export_dir = trailingslashit($upload_dir['basedir']) . WP_CLANWARS_EXPORTDIR;
 		$unzip_dir = sprintf('%s/unzip-' . md5(microtime(true)), $export_dir);
 
+		$clean_unzip_dir = function () use ($wp_filesystem, $unzip_dir) {
+			$wp_filesystem->rmdir($unzip_dir, true);
+		};
+
 		$wp_filesystem->mkdir($export_dir);
 		$wp_filesystem->mkdir($unzip_dir);
 
 		$result = unzip_file($zip_file, $unzip_dir);
 
 		if(!$result) {
+			$clean_unzip_dir();
 			return new WP_Error('plugin-error', 'Unable to unzip file.');
 		}
 
-		$index_file = trailingslashit($unzip_dir) . 'index.json';
+		$index_file = trailingslashit($unzip_dir) . WP_CLANWARS_ZIPINDEX;
 		if(!file_exists($index_file)) {
-			return new WP_Error('plugin-error', 'ZIP file is corrupted.');
+			$clean_unzip_dir();
+			return new WP_Error('plugin-error', 'Index file is not found in ZIP.');
 		}
 
 		$game_data = @json_decode( $wp_filesystem->get_contents($index_file) );
 
 		if(!is_object($game_data)) {
+			$clean_unzip_dir();
 			return new WP_Error('plugin-error', 'Corrupted or missing contents from ZIP file.');
 		}
 
@@ -1458,6 +1498,7 @@ class WP_ClanWars {
 		));
 
 		if(empty($game_data['title'])) {
+			$clean_unzip_dir();
 			return new WP_Error('plugin-error', 'Corrupted or missing contents from ZIP file.');
 		}
 
@@ -1469,6 +1510,7 @@ class WP_ClanWars {
 		$game_id = $this->add_game($p);
 
 		if(empty($game_id)) {
+			$clean_unzip_dir();
 			return new WP_Error('plugin-error', 'Failed to add game.');
 		}
 
@@ -1482,7 +1524,7 @@ class WP_ClanWars {
 			}
 		}
 
-		$wp_filesystem->rmdir($unzip_dir, true);
+		$clean_unzip_dir();
 
 		return true;
 	}
@@ -3689,7 +3731,7 @@ class WP_ClanWars {
 
 					if($file['error'] == 0) {
 						$result = $this->import_game($file['tmp_name']);
-						$url = add_query_arg('import', $result, $url);
+						$url = add_query_arg('import', ($result === true ? 'success' : 'error'), $url);
 					} else {
 						$url = add_query_arg('upload', 'error', $url);
 					}
@@ -3699,16 +3741,20 @@ class WP_ClanWars {
 			case 'available':
 
 				$available_games = $this->get_available_games();
+				$result = true;
 
 				foreach($items as $item) {
 					if(isset($available_games[$item])) {
 						$r = $available_games[$item];
 						$filename = trailingslashit(WP_CLANWARS_IMPORTPATH) . $r->package;
 						$result = $this->import_game($filename);
+						if($result !== true) {
+							break;
+						}
 					}
 				}
 
-				$url = add_query_arg('import', true, $url);
+				$url = add_query_arg('import', ($result === true ? 'success' : 'error'), $url);
 
 				break;
 		}
@@ -3965,7 +4011,7 @@ class WP_ClanWars {
 			$this->add_notice(__('An upload error occurred while import.', WP_CLANWARS_TEXTDOMAIN), 'error');
 		
 		if(isset($_GET['import']))
-			$this->add_notice($_GET['import'] ? __('File(s) successfully imported.', WP_CLANWARS_TEXTDOMAIN) : __('An error occurred while import.', WP_CLANWARS_TEXTDOMAIN), $_GET['import'] ? 'updated' : 'error');
+			$this->add_notice($_GET['import'] === 'success' ? __('File(s) successfully imported.', WP_CLANWARS_TEXTDOMAIN) : __('An error occurred while import.', WP_CLANWARS_TEXTDOMAIN), $_GET['import'] === 'success' ? 'updated' : 'error');
 
 		echo $this->print_notices();
 		
@@ -4010,7 +4056,7 @@ class WP_ClanWars {
 				<?php endif; ?>
 
 				<fieldset>
-					<p><label for="upload"><input type="radio" name="import" id="upload" value="upload" /> <?php _e('Upload Package (ZIP file)', WP_CLANWARS_TEXTDOMAIN); ?></label></p>
+					<p><label for="upload"><input type="radio" name="import" id="upload" value="upload" /> <?php _e('Upload package (ZIP file)', WP_CLANWARS_TEXTDOMAIN); ?></label></p>
 					<p><input type="file" name="userfile" /></p>
 				</fieldset>
 
