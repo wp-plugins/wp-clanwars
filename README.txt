@@ -1,9 +1,9 @@
 === WP-ClanWars ===
 Contributors: andddd
 Tags: cybersport, clanwar, team, clan, cyber, sport, match
-Requires at least: 3.0.1
-Tested up to: 4.0
-Stable tag: 1.6.3
+Requires at least: 4.1
+Tested up to: 4.2.2
+Stable tag: 1.7.0
 License: GPLv3
 License URI: http://www.gnu.org/licenses/gpl-3.0.html
 
@@ -69,3 +69,7 @@ Make sure your MySQL server supports InnoDB, otherwise this plugin won't work.
 * Add import/export to ZIP
 * Add "Export" link next to "Maps" in Games section
 * Drop old localizations
+
+== Attributions ==
+
+Plugin icon made by [Freepik](http://www.flaticon.com/authors/freepik "Freepik") from [www.flaticon.com](http://www.flaticon.com "Flaticon") is licensed by [CC BY 3.0](http://creativecommons.org/licenses/by/3.0/ "Creative Commons BY 3.0").
